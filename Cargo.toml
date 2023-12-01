@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+  "ggml-proc-macro-test",
+  "ggml-proc-macro",
+  "ggml", 
+  "ggml-sys"
+]
