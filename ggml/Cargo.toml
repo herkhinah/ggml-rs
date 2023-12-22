@@ -14,7 +14,6 @@ rocm = []
 
 [dependencies]
 ggml-sys = { path = "../ggml-sys", features = [ "cublas" ] }
-ghost-cell = "0.2.4"
 once_cell = "1.19.0"
 serde = "1.0.193"
 thiserror = "1.0.50"

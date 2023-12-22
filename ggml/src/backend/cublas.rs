@@ -120,7 +120,6 @@ impl<'a> Builder<'a> for CudaBackendBuilder<'a> {
     }
 
     fn tensor_info(&self, name: &str) -> Result<&GGUFTensorInfo<'a>, Self::Error> {
-        eprintln!("tensor info: {name}");
         match self.gguf_ctx.tensor_info(name) {
             Some(d) => Ok(d),
             None => Err(BuilderError::TensorNotFound(name.to_string())),
@@ -202,13 +201,10 @@ impl<'a> Builder<'a> for CudaBackendBuilder<'a> {
             std::alloc::dealloc(std::mem::transmute((*tensor).data), layout);
         }
 
-        println!("load_tensor addr: {:#?}", tensor);
-
         return Ok(GTensor(tensor, PhantomData));
     }
 
     fn tensor(&self, name: &str) -> Result<&GTensor<'a>, Self::Error> {
-        eprintln!("tensor info: {name}");
         match self._available_tensors.get(name) {
             Some(t) => Ok(t),
             None => Err(BuilderError::TensorNotFound(name.to_string())),

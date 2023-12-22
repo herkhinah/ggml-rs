@@ -20,7 +20,7 @@ pub trait Deserialize<'a>: Sized {
         let (mut res, tensors) = Self::deserialize_relative(String::new(), builder)?;
         builder.alloc(tensors);
         Self::register_tensors(&mut res, String::new(), builder)?;
-        Ok(res.into_inner())
+        Ok(res)
     }
 
     fn deserialize_relative<B: crate::builder::Builder<'a>>(

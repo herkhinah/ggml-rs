@@ -338,25 +338,22 @@ fn register_tensors_vec(
             let inner_loop = register_tensors_vec(&ident2,  ty, index2, format_str);
 
             quote! {
-                let mut #ident = unsafe { &*(#ident.as_ptr() as *mut Vec<ghost_cell::GhostCell< '_, _  >>) };
-                for (#index, value) in #ident.iter().enumerate() {
+                for (#index, value) in #ident.iter_mut().enumerate() {
                     #inner_loop
                 }
             }
 
         },
         ParsedType::Tensor(_) => quote! {
-            let mut #ident = unsafe { &*(#ident.as_ptr() as *mut Vec<ghost_cell::GhostCell< '_, GTensor<'_>  >>) };
-            for (#index, value) in #ident.iter().enumerate() {
-                *value.borrow_mut(token) = builder.load_tensor(format!(#format_str).as_str())?;
+            for (#index, value) in #ident.iter_mut().enumerate() {
+                *value = builder.load_tensor(format!(#format_str).as_str())?;
             }
         },
         ParsedType::Struct(ty) => {
             quote! {
-                let #ident: &Vec<_> = unsafe { &*(#ident.as_ptr() as *mut Vec<ghost_cell::GhostCell< '_, #ty  >>) };
-                
-                for (#index, value) in #ident.iter().enumerate() {
-                    ggml::gguf::Deserialize::register_tensors(value, token, format!(#format_str), builder);
+              
+                for (#index, value) in #ident.iter_mut().enumerate() {
+                    value.register_tensors(format!(#format_str), builder);
                 }
             }
         },
@@ -389,11 +386,11 @@ fn register_tensors(pstruct: &ParsedStruct) -> TokenStream {
             ParsedType::Tensor(None) => todo!(),
             ParsedType::Tensor(Some(init)) => match init {
                 TensorInitMode::Load => {
-                    quote! { *#eident.borrow_mut(token) = builder.load_tensor(#name)?; }
+                    quote! { *#eident = builder.load_tensor(#name)?; }
                 },
             },
             ParsedType::Struct(_) => {
-                quote! { ggml::gguf::Deserialize::register_tensors(#eident, token, format!("{root}{}", #name), builder);  }
+                quote! { #eident.register_tensor( format!("{root}{}", #name), builder);  }
             },
         }
     });
@@ -417,12 +414,9 @@ pub fn derive_deserialize_fn(input: proc_macro::TokenStream) -> proc_macro::Toke
     let build_struct = build_struct_fields(&pstruct);
     let destructure_fields = destruct_ghost_fields(&pstruct);
     let register_tensors = register_tensors(&pstruct);
-    let ghost_cell_struct_ident = Ident::new(format!("__GhostCellProject_{}", ident.to_string()).as_str(), Span::call_site());
-    let gc_project = gc_project(ident, &ast.generics.params, &pstruct.fields);
 
 
     let expanded = quote! {
-        #gc_project
         
         impl<'a> Deserialize<'a> for #ident <'a> {
             fn deserialize_relative<B: ggml::builder::Builder<'a>>(root: String, builder: &B) -> Result<(Self, usize), B::Error> {
@@ -432,14 +426,13 @@ pub fn derive_deserialize_fn(input: proc_macro::TokenStream) -> proc_macro::Toke
             }
 
             fn register_tensors<'id, B: ggml::builder::Builder<'a>>(
-                this: &ghost_cell::GhostCell<'id, Self>,
-                token: &mut ghost_cell::GhostToken<'id>,
+                &mut self,
                 root: String,
                 builder: &mut B
             ) -> Result<(), B::Error> {
-                let #ghost_cell_struct_ident {
+                let Self {
                     #destructure_fields
-                } = this.as_struct_of_cells();
+                } = self;
 
                 #register_tensors
 
@@ -451,70 +444,4 @@ pub fn derive_deserialize_fn(input: proc_macro::TokenStream) -> proc_macro::Toke
     };
 
     proc_macro::TokenStream::from(expanded)
-}
-
-fn gc_project(ident: &Ident, params: &Punctuated<GenericParam, Comma>, fields: &[ParsedStructField]) -> TokenStream {
-    let project_struct =      Ident::new(
-            format!("__GhostCellProject_{}", &ident.to_string()).as_str(),
-            Span::call_site(),
-        );
-
-    let project_trait = Ident::new(
-        format!("__GhostCellProjectTrait_{}", &ident.to_string()).as_str(),
-        Span::call_site(),
-    );
-    
-
-
-    let brand = Lifetime::new("'id", Span::call_site());
-    let struct_fields = fields.into_iter().map( |f| {
-        let Field {
-             attrs,
-             vis,
-             mutability,
-             ident,
-             colon_token,
-             ty,
-         } = f.field.clone();
-        let ty = quote! {
-            ghost_cell::ghost_cell::GhostCell< #brand, #ty >
-        };
-
-        let field = Field {
-            ty: syn::parse2(ty).unwrap(),
-            attrs: Vec::new(),
-            vis,
-            mutability,
-            ident,
-            colon_token,
-        };
-
-        quote! { #field, }
-    });
-
-    let struct_fields = TokenStream::from_iter(struct_fields);
-
-    quote! {
-
-        struct #project_struct < #brand, #params > {
-            #struct_fields
-
-        }
-
-        pub trait #project_trait {
-            type StructOfCells;
-
-            fn as_struct_of_cells(&self) -> &Self::StructOfCells;
-        }
-
-        impl < #brand, #params > #project_trait for ::ghost_cell::GhostCell< #brand, #ident < #params >> {
-            type StructOfCells = #project_struct < #brand, #params >;
-
-            fn as_struct_of_cells(&self) -> &Self::StructOfCells {
-                unsafe { &*(self.as_ptr() as *mut #project_struct < #brand, #params >) }
-            }
-
-
-        }
-    }
 }
