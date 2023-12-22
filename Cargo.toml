@@ -4,5 +4,6 @@ members = [
   "ggml-proc-macro-test",
   "ggml-proc-macro",
   "ggml", 
-  "ggml-sys"
+  "ggml-sys",
+  "minigpt4"
 ]

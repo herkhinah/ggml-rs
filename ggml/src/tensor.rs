@@ -33,6 +33,7 @@ impl<'a> GTensor<'a> {
     }
 
     pub fn name(&self) -> &str {
+        println!("{:#?}", self.0);
         std::ffi::CStr::from_bytes_until_nul(unsafe {
             std::mem::transmute((*self.0).name.as_slice())
         })
@@ -88,4 +89,10 @@ impl<'a> GTensor<'a> {
             PhantomData,
         )
     }*/
+}
+
+impl<'a> std::fmt::Debug for GTensor<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("GTensor({:#?})", self.0))
+    }
 }

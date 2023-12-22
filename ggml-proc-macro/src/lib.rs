@@ -181,13 +181,14 @@ fn build_struct_field_vec(
     index: String,
     format_str: String,
 ) -> TokenStream {
-    let format_str = format!("{format_str}.{{{index}}}");
+    let format_str = format!("{format_str}{{{index}}}.");
     let f_expr = {
         let format_str = Literal::string(format_str.as_str());
         quote! {
             format!(#format_str, #name)
         }
     };
+
 
     match ty {
         ParsedType::Vec(ty) => {
@@ -202,6 +203,7 @@ fn build_struct_field_vec(
             quote! {
                 let #ident = {
                     let mut vec = ::std::vec::Vec::new();
+                    let mut #index = 0;
                     for #index in (0..) {
                         #inner_loop
                         vec.push(#inner_ident);
@@ -216,7 +218,7 @@ fn build_struct_field_vec(
                 let #ident = {
                     let mut vec = ::std::vec::Vec::new();
                     let mut #index = 0;
-                    while let Some(tensor) = builder.tensor_info(#f_expr.as_str()) {
+                    while let Ok(tensor) = builder.tensor_info(#f_expr.as_str()) {
                         vec.push(unsafe { GTensor::null() });
                         #index += 1;
                         tensors += 1;
@@ -244,6 +246,21 @@ fn build_struct_field_vec(
     }
 }
 
+
+fn check_tensors(pstruct: &ParsedStruct) -> TokenStream {
+    let ParsedStruct {  ty, fields , ..} = pstruct;
+    let check_tensors = TokenStream::from_iter(fields.iter().filter(|f| matches!(f.ty, ParsedType::Tensor(_))).map(|f| {
+        let ParsedStructField { ident, name, ty, field } = f;
+        quote! {
+            builder.tensor_info(format!("{root}{}", #name).as_str())?;
+            
+        }
+        
+    }));
+
+    check_tensors
+    
+}
 fn build_struct_fields(pstruct: &ParsedStruct) -> TokenStream {
     let ParsedStruct {  ty, fields , ..} = pstruct;
 
@@ -258,7 +275,7 @@ fn build_struct_fields(pstruct: &ParsedStruct) -> TokenStream {
                     name,
                     ty,
                     "i".to_owned(),
-                    "{root}.{}".to_owned(),
+                    "{root}{}.".to_owned(),
                 ),
                 ParsedType::Tensor(_) => {
                     quote! {
@@ -270,7 +287,7 @@ fn build_struct_fields(pstruct: &ParsedStruct) -> TokenStream {
                    
                     quote! {
                         let #escaped_ident: #path = {
-                            let (#escaped_ident, tensors_) = ggml::gguf::Deserialize::deserialize_relative(format!("{root}.{}", #name).as_str(), builder)?;
+                            let (#escaped_ident, tensors_) = ggml::gguf::Deserialize::deserialize_relative(format!("{root}{}.", #name).as_str(), builder)?;
                             tensors += tensors_;
                             #escaped_ident
                         }
@@ -336,7 +353,7 @@ fn register_tensors_vec(
         },
         ParsedType::Struct(ty) => {
             quote! {
-                let mut #ident = unsafe { &*(#ident.as_ptr() as *mut Vec<ghost_cell::GhostCell< '_, #ty  >>) };
+                let #ident: &Vec<_> = unsafe { &*(#ident.as_ptr() as *mut Vec<ghost_cell::GhostCell< '_, #ty  >>) };
                 
                 for (#index, value) in #ident.iter().enumerate() {
                     ggml::gguf::Deserialize::register_tensors(value, token, format!(#format_str), builder);
@@ -368,7 +385,7 @@ fn register_tensors(pstruct: &ParsedStruct) -> TokenStream {
         let eident = f.escaped_ident();
 
         match ty {
-            ParsedType::Vec(ty) =>  register_tensors_vec(&eident, ty, "i".into(), "{root}.{i}".into()),
+            ParsedType::Vec(ty) =>  register_tensors_vec(&eident, ty, "i".into(), "{root}{i}".into()),
             ParsedType::Tensor(None) => todo!(),
             ParsedType::Tensor(Some(init)) => match init {
                 TensorInitMode::Load => {
@@ -376,7 +393,7 @@ fn register_tensors(pstruct: &ParsedStruct) -> TokenStream {
                 },
             },
             ParsedType::Struct(_) => {
-                quote! { ggml::gguf::Deserialize::register_tensors(#eident, token, format!("{root}.#name"), builder);  }
+                quote! { ggml::gguf::Deserialize::register_tensors(#eident, token, format!("{root}{}", #name), builder);  }
             },
         }
     });
@@ -396,6 +413,7 @@ pub fn derive_deserialize_fn(input: proc_macro::TokenStream) -> proc_macro::Toke
 
     let ParsedStruct { ident,  ..} = &pstruct;
 
+    let check_tensors = check_tensors(&pstruct);
     let build_struct = build_struct_fields(&pstruct);
     let destructure_fields = destruct_ghost_fields(&pstruct);
     let register_tensors = register_tensors(&pstruct);
@@ -409,6 +427,7 @@ pub fn derive_deserialize_fn(input: proc_macro::TokenStream) -> proc_macro::Toke
         impl<'a> Deserialize<'a> for #ident <'a> {
             fn deserialize_relative<B: ggml::builder::Builder<'a>>(root: String, builder: &B) -> Result<(Self, usize), B::Error> {
                 let mut tensors = 0;
+                #check_tensors
                 #build_struct
             }
 

@@ -17,14 +17,10 @@ pub use ggml_proc_macro::Deserialize;
 
 pub trait Deserialize<'a>: Sized {
     fn deserialize<B: crate::builder::Builder<'a>>(builder: &mut B) -> Result<Self, B::Error> {
-        let (res, tensors) = Self::deserialize_relative(String::new(), builder)?;
+        let (mut res, tensors) = Self::deserialize_relative(String::new(), builder)?;
         builder.alloc(tensors);
-        ghost_cell::GhostToken::new(|mut token| {
-            let res = ghost_cell::GhostCell::new(res);
-
-            Self::register_tensors(&res, &mut token, String::new(), builder)?;
-            Ok(res.into_inner())
-        })
+        Self::register_tensors(&mut res, String::new(), builder)?;
+        Ok(res.into_inner())
     }
 
     fn deserialize_relative<B: crate::builder::Builder<'a>>(
@@ -32,9 +28,8 @@ pub trait Deserialize<'a>: Sized {
         builder: &B,
     ) -> Result<(Self, usize), B::Error>;
 
-    fn register_tensors<'id, B: crate::builder::Builder<'a>>(
-        this: &ghost_cell::GhostCell<'id, Self>,
-        token: &mut ghost_cell::GhostToken<'id>,
+    fn register_tensors<B: crate::builder::Builder<'a>>(
+        &mut self,
         root: String,
         builder: &mut B,
     ) -> Result<(), B::Error>;
