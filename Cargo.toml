@@ -1,9 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+  "proc-macro-common",
   "ggml-proc-macro-test",
   "ggml-proc-macro",
   "ggml", 
+  "gguf",
   "ggml-sys",
-  "minigpt4"
+  "minigpt4",
+  "gpt2",
+  "gpt-neox"
 ]

@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     io::{Read, Seek, SeekFrom},
     marker::PhantomData,
     path::Path,
@@ -11,10 +10,10 @@ use thiserror::Error;
 
 use crate::{
     builder::Builder,
-    error::GError,
-    gguf::{GGUFContext, GGUFError, GGUFTensorInfo},
-    tensor::GTensor,
-    TensorsIterator,
+    error::Error,
+    gguf::{GGUFContext, GGUFError, GGUFKeyValue, GGUFTensorInfo},
+    tensor::Tensor,
+    Context,
 };
 
 pub struct CudaBackend {
@@ -75,8 +74,7 @@ pub struct CudaBackendBuilder<'a> {
     pub(crate) _backend: *mut ggml_backend,
     pub(crate) gguf_ctx: GGUFContext<'a>,
     pub(crate) gguf_file: std::fs::File,
-    pub(crate) _available_tensors: HashMap<String, GTensor<'a>>,
-    pub(crate) ggml_context: Option<*mut ggml_context>,
+    pub(crate) ggml_context: Option<Context>,
 }
 
 impl<'a> CudaBackendBuilder<'a> {
@@ -84,17 +82,11 @@ impl<'a> CudaBackendBuilder<'a> {
         let gguf_ctx = GGUFContext::from_file(&gguf_path)?;
         let gguf_file = std::fs::File::open(gguf_path).map_err(GGUFError::IOError)?;
 
-        let _available_tensors = gguf_ctx
-            .tensor_iter()
-            .map(|t| (t.name().to_string(), unsafe { GTensor(t.0, PhantomData) }))
-            .collect::<HashMap<String, GTensor<'a>>>();
-
         let _backend = unsafe { ggml_backend_cuda_init(device.0) };
         Ok(CudaBackendBuilder {
             _backend,
             gguf_ctx,
             gguf_file,
-            _available_tensors,
             ggml_context: None,
         })
     }
@@ -105,22 +97,25 @@ pub enum BuilderError {
     #[error("tensor with this name already exists")]
     DuplicateTensor,
     #[error("{0}")]
-    GGUFError(GGUFError),
+    GGUFError(#[from] GGUFError),
     #[error("{0}")]
-    GError(GError),
+    GError(#[from] Error),
     #[error("tensor not found: {0}")]
     TensorNotFound(String),
+    #[error("key not found: {0}")]
+    KeyValueNotFound(String),
 }
 
 impl<'a> Builder<'a> for CudaBackendBuilder<'a> {
     type Error = BuilderError;
 
+    /*
     fn tensors(&self) -> TensorsIterator<'_> {
         self.gguf_ctx.tensor_iter()
     }
-
-    fn tensor_info(&self, name: &str) -> Result<&GGUFTensorInfo<'a>, Self::Error> {
-        match self.gguf_ctx.tensor_info(name) {
+    */
+    fn get_tensor_info(&self, name: &str) -> Result<&GGUFTensorInfo<'a>, Self::Error> {
+        match self.gguf_ctx.tensor_infos.get(name) {
             Some(d) => Ok(d),
             None => Err(BuilderError::TensorNotFound(name.to_string())),
         }
@@ -137,10 +132,12 @@ impl<'a> Builder<'a> for CudaBackendBuilder<'a> {
             no_alloc,
         };
 
-        self.ggml_context = Some(unsafe { ggml_init(init_params) });
+        let ctx = Context(unsafe { ggml_init(init_params) });
+
+        self.ggml_context = Some(ctx);
     }
 
-    fn load_tensor(&mut self, name: &str) -> Result<GTensor<'a>, Self::Error> {
+    fn load_tensor(&mut self, name: &str) -> Result<Tensor<'a>, Self::Error> {
         let Self {
             gguf_ctx,
             gguf_file,
@@ -152,36 +149,18 @@ impl<'a> Builder<'a> for CudaBackendBuilder<'a> {
         };
         let data_offset = unsafe { gguf_get_data_offset(gguf_ctx.gguf_ctx) } as u64;
 
-        let Some(tensor_) = self._available_tensors.get(name) else {
+        let Some(tensor_info) = self.gguf_ctx.tensor_infos.get(name) else {
             return Err(BuilderError::TensorNotFound(name.to_string()));
         };
-        let tensor = unsafe { ggml_dup_tensor(*ctx, tensor_.0) };
+        let tensor = unsafe { Tensor::from_tensor_info(ctx, tensor_info) }?;
         unsafe {
-            (*tensor).backend = ggml_backend_type_GGML_BACKEND_GPU;
+            (*tensor.0).backend = ggml_backend_type::GGML_BACKEND_GPU;
         }
-        unsafe {
-            ggml_set_name(
-                tensor,
-                std::mem::transmute((*tensor_.0).name.as_slice().as_ptr()),
-            );
-        }
-        let nbytes = unsafe { ggml_nbytes(tensor) };
+        let nbytes = unsafe { ggml_nbytes(tensor.0) };
         let layout = std::alloc::Layout::array::<u8>(nbytes).unwrap();
-        let name = std::ffi::CStr::from_bytes_until_nul(unsafe {
-            std::mem::transmute((*tensor).name.as_slice())
-        })
-        .unwrap();
-        let name = name.to_str().unwrap();
-
-        let tensor_info =
-            gguf_ctx
-                .tensor_info(name)
-                .ok_or(BuilderError::GError(GError::GGUFTensorNotFound(
-                    name.into(),
-                )))?;
 
         unsafe {
-            (*tensor).data = std::alloc::alloc(layout) as *mut std::ffi::c_void;
+            (*tensor.0).data = std::alloc::alloc(layout) as *mut std::ffi::c_void;
         };
 
         let tensor_offset = tensor_info.inner.offset;
@@ -192,23 +171,23 @@ impl<'a> Builder<'a> for CudaBackendBuilder<'a> {
 
         gguf_file
             .read_exact(unsafe {
-                std::slice::from_raw_parts_mut(std::mem::transmute((*tensor).data), nbytes)
+                std::slice::from_raw_parts_mut(std::mem::transmute((*tensor.0).data), nbytes)
             })
             .unwrap();
 
         unsafe {
-            ggml_cuda_transform_tensor((*tensor).data, tensor);
-            std::alloc::dealloc(std::mem::transmute((*tensor).data), layout);
+            ggml_cuda_transform_tensor((*tensor.0).data, tensor.0);
+            std::alloc::dealloc(std::mem::transmute((*tensor.0).data), layout);
         }
 
-        return Ok(GTensor(tensor, PhantomData));
+        return Ok(Tensor(tensor.0, PhantomData));
     }
 
-    fn tensor(&self, name: &str) -> Result<&GTensor<'a>, Self::Error> {
-        match self._available_tensors.get(name) {
-            Some(t) => Ok(t),
-            None => Err(BuilderError::TensorNotFound(name.to_string())),
-        }
+    fn get_key_value(&self, key: &str) -> Result<&GGUFKeyValue<'a>, Self::Error> {
+        self.gguf_ctx
+            .key_values
+            .get(key)
+            .ok_or(BuilderError::KeyValueNotFound(key.to_string()))
     }
 
     /*

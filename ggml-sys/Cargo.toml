@@ -1,0 +1,28 @@
+[package]
+name = "ggml-sys"
+version = "2312080048.0.0+llamacpp-release.b1620"
+description = "Bleeding edge low-level bindings to GGML. "
+repository = "https://github.com/KerfuffleV2/ggml-sys-bleedingedge"
+keywords = ["deep-learning", "machine-learning", "tensors", "ggml", "ml"]
+edition = "2021"
+license = "MIT"
+resolver = "2"
+
+[features]
+default = ["use_cmake", "llamacpp_api", "cublas"]
+no_k_quants = []
+no_accelerate = []
+use_cmake = []
+cublas = ["use_cmake"]
+clblast = ["use_cmake"]
+openblas = ["use_cmake"]
+metal = ["use_cmake"]
+hipblas = ["use_cmake"]
+llamacpp_api = ["use_cmake"]
+
+[lib]
+
+[build-dependencies]
+cc = "^1.0"
+bindgen = "0.69"
+cmake = "0.1"

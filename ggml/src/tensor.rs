@@ -1,38 +1,55 @@
 use std::{marker::PhantomData, ptr::null_mut};
 
-use ggml_sys::root::{ggml_tensor, ggml_type, ggml_type_GGML_TYPE_F16, ggml_type_GGML_TYPE_F32};
+use ggml_sys::root::{ggml_new_tensor, ggml_set_name, ggml_tensor};
 
-use super::GGMLContext;
+use crate::{error::Error, gguf::GGUFTensorInfo};
 
-pub trait DType {
-    const GGML_TYPE: ggml_type;
-}
+use super::Context;
 
-pub struct F32();
-
-impl DType for F32 {
-    const GGML_TYPE: ggml_type = ggml_type_GGML_TYPE_F32;
-}
-
-pub struct F16();
-
-impl DType for F16 {
-    const GGML_TYPE: ggml_type = ggml_type_GGML_TYPE_F16;
-}
-
-pub struct GTensor<'a>(
+pub struct Tensor<'a>(
     pub(crate) *mut ggml_tensor,
-    pub(crate) PhantomData<&'a GGMLContext>,
+    pub(crate) PhantomData<&'a Context>,
 );
 
-//impl<'a> Unpin! for GTensor<'a>;
-
-impl<'a> GTensor<'a> {
+impl<'a> Tensor<'a> {
     pub unsafe fn null() -> Self {
         Self(null_mut(), PhantomData)
     }
 
+    pub unsafe fn from_tensor_info(
+        ctx: &'a Context,
+        info: &GGUFTensorInfo<'_>,
+    ) -> Result<Self, Error> {
+        let ggml_tensor = unsafe {
+            let ne = [
+                (*info.inner).ne[0] as i64,
+                (*info.inner).ne[1] as i64,
+                (*info.inner).ne[2] as i64,
+                (*info.inner).ne[3] as i64,
+            ];
+
+            ggml_new_tensor(
+                ctx.0,
+                (*info.inner).type_,
+                (*info.inner).n_dims as i32,
+                ne.as_ptr(),
+            )
+        };
+
+        if ggml_tensor.is_null() {
+            return Err(Error::GGMLNewTensorFailed);
+        }
+
+        unsafe {
+            ggml_set_name(ggml_tensor, (*info.inner).name.data);
+        }
+
+        Ok(Self(ggml_tensor, PhantomData))
+    }
+
     pub fn name(&self) -> &str {
+        assert_ne!(self.0, null_mut());
+
         std::ffi::CStr::from_bytes_until_nul(unsafe {
             std::mem::transmute((*self.0).name.as_slice())
         })
@@ -88,4 +105,10 @@ impl<'a> GTensor<'a> {
             PhantomData,
         )
     }*/
+}
+
+impl<'a> std::fmt::Debug for Tensor<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GTensor").finish_non_exhaustive()
+    }
 }

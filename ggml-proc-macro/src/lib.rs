@@ -1,11 +1,9 @@
 use proc_macro2::{Literal, Span, TokenStream, TokenTree};
 use quote::{quote, ToTokens};
 use syn::{
-    parse_macro_input,
-    punctuated::Punctuated,
     Attribute, Data, DeriveInput, Field, GenericArgument, Ident,
     Meta::{self},
-    MetaList, Path, PathArguments, Type, TypePath, Lifetime, GenericParam, token::Comma,
+    MetaList, Path, PathArguments, Type, TypePath, parse_macro_input,
 };
 
 #[derive(Debug)]
@@ -13,6 +11,8 @@ enum ParsedType {
     Vec(Box<ParsedType>),
     Tensor(Option<TensorInitMode>),
     Struct(TypePath),
+    KeyValue,
+    KeyValueVec
 }
 
 #[derive(Debug)]
@@ -36,12 +36,12 @@ struct ParsedStructField {
     ident: Ident,
     name: Literal,
     ty: ParsedType,
-    field: Field
 }
 
 #[derive(Debug)]
 enum TensorInitMode {
     Load,
+    Skip
 }
 
 macro_rules! format_err {
@@ -70,7 +70,8 @@ impl TryFrom<Type> for ParsedType {
                 };
 
                 // todo: don't assume std::vec::Vec
-                if ty.ident.to_string() == "Vec" {
+                let res = match ty.ident.to_string().as_str() {
+                "Vec" => {
                     let PathArguments::AngleBracketed(args) = &ty.arguments else {
                         panic!();
                     };
@@ -81,14 +82,22 @@ impl TryFrom<Type> for ParsedType {
 
                     let ty = ParsedType::try_from(ty.clone())?;
 
-                    return Ok(ParsedType::Vec(Box::new(ty)));
+                    if matches!(ty, ParsedType::KeyValue) {
+                        ParsedType::KeyValueVec
+                    } else {
+                        ParsedType::Vec(Box::new(ty))
+                    }
                 }
 
-                if ty.ident.to_string() == "GTensor" {
-                    return Ok(ParsedType::Tensor(None));
-                }
+                "Tensor" => {
+                    ParsedType::Tensor(None)
+                },
+                "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "f32" | "f64" | "String" | "str" => ParsedType::KeyValue,
+                _ => ParsedType::Struct(TypePath { qself, path: path.clone()} )
+            };
 
-                Ok(ParsedType::Struct(TypePath { qself, path: path.clone()} ))
+            return Ok(res);
+
             }
             ty => bail!(ty, "unexpected type"),
         }
@@ -105,19 +114,31 @@ impl TryFrom<Field> for ParsedStructField {
             ty, ..
         } = value.clone();
         let mut ty = ParsedType::try_from(ty)?;
-
+        let attrs = ParsedAttributes::try_from(attrs.as_slice())?;
+        
         if let ParsedType::Tensor(init_mode) = &mut ty {
-            *init_mode = Some(TensorInitMode::Load);
+            if attrs.skip {
+                *init_mode = Some(TensorInitMode::Skip);
+            } else {
+                *init_mode = Some(TensorInitMode::Load);
+            }
         }
 
         let Some(ident) = ident else {
             bail!(value, "struct field has no identifier");
         };
 
-        let name = gguf_path_segment(attrs.as_slice())?
-            .unwrap_or_else(|| Literal::string(ident.to_string().as_str()));
 
-        Ok(ParsedStructField { ident, name, ty, field: value })
+        let name = attrs.key
+            .unwrap_or_else(|| {
+                let mut ident = ident.to_string();
+                if matches!(ty, ParsedType::Tensor(_)) {
+                    ident.push_str(".weight");
+                }
+                Literal::string(ident.as_str())
+            });
+
+        Ok(ParsedStructField { ident, name, ty, })
     }
 }
 
@@ -147,32 +168,58 @@ impl TryFrom<DeriveInput> for ParsedStruct {
 }
 
 
-fn gguf_path_segment(attrs: &[Attribute]) -> syn::Result<Option<Literal>> {
-    let mut path_segment = None;
+struct ParsedAttributes {
+    key: Option<Literal>,
+    skip: bool
+}
 
-    for attrs in attrs {
-        let Meta::List(MetaList { path, tokens, .. }) = &attrs.meta else {
-            continue;
-        };
-
-        let Some(_) = path.segments.last().map(|s| s.ident.to_string()) else {
-            continue;
-        };
-
-        for token in tokens.into_token_stream() {
-            let TokenTree::Literal(literal) = token.clone() else {
-                bail!(token, "expected string literal");
-            };
-
-            if path_segment.is_some() {
-                bail!(token, "duplicate attribute");
-            }
-
-            path_segment = Some(literal);
+impl Default for ParsedAttributes {
+    fn default() -> Self {
+        Self {
+            key: None,
+            skip: false
         }
     }
-    Ok(path_segment)
 }
+
+impl TryFrom<&[Attribute]> for ParsedAttributes {
+    type Error = syn::Error;
+
+    fn try_from(attrs: &[Attribute]) -> Result<Self, Self::Error> {
+        let mut path_segment = ParsedAttributes::default();
+        for attrs in attrs {
+            let Meta::List(MetaList { path, tokens, .. }) = &attrs.meta else {
+                continue;
+            };
+
+            if let Some(attr) = path.segments.last().map(|s| s.ident.to_string()) {
+                match attr.as_str() {
+                    "skip" => { path_segment.skip = true; }
+                    "rename" => {
+                        for token in tokens.into_token_stream() {
+                            let TokenTree::Literal(literal) = token.clone() else {
+                                bail!(token, "expected string literal");
+                            };
+
+                            if path_segment.key.is_some() {
+                                bail!(token, "duplicate attribute");
+                            }
+
+                            path_segment.key = Some(literal);
+                        }
+                    }
+                    _ => {}
+                }
+                
+                continue;
+            };
+
+        }
+        Ok(path_segment)
+        
+    }
+}
+
 
 fn build_struct_field_vec(
     ident: &Ident,
@@ -181,11 +228,12 @@ fn build_struct_field_vec(
     index: String,
     format_str: String,
 ) -> TokenStream {
-    let format_str = format!("{format_str}{{{index}}}.");
+    let format_str = format!("{format_str}{{}}.");
     let f_expr = {
         let format_str = Literal::string(format_str.as_str());
+        let index = Literal::string(index.as_str());
         quote! {
-            format!(#format_str, #name)
+            ::std::fmt::format(format_args!(#format_str, #name, #index))
         }
     };
 
@@ -218,8 +266,8 @@ fn build_struct_field_vec(
                 let #ident = {
                     let mut vec = ::std::vec::Vec::new();
                     let mut #index = 0;
-                    while let Ok(tensor) = builder.tensor_info(#f_expr.as_str()) {
-                        vec.push(unsafe { GTensor::null() });
+                    while let Ok(tensor) = builder.get_tensor_info(#f_expr.as_str()) {
+                        vec.push(unsafe { Tensor::null() });
                         #index += 1;
                         tensors += 1;
                     }
@@ -242,17 +290,36 @@ fn build_struct_field_vec(
                     vec
                 };
             }
+       }
+       ParsedType::KeyValueVec => {
+            let index = Ident::new(index.as_str(), Span::call_site());
+          
+            quote! {
+                let #ident = {
+                    let mut vec = ::std::vec::Vec::new();
+                    let mut #index = 0usize;
+                    while let Ok((value)) = builder.get_key_value(std::fmt::format(format_args!("{root}{}", #name)).as_str()) {
+                        vec.push(value.try_into()?);
+                        #index += 1;
+                    }
+                    vec
+                };
+            }
+            
         }
+       ParsedType::KeyValue => {
+            panic!("impossible: please report bug")
+       }
     }
 }
 
 
 fn check_tensors(pstruct: &ParsedStruct) -> TokenStream {
-    let ParsedStruct {  ty, fields , ..} = pstruct;
+    let ParsedStruct { fields , ..} = pstruct;
     let check_tensors = TokenStream::from_iter(fields.iter().filter(|f| matches!(f.ty, ParsedType::Tensor(_))).map(|f| {
-        let ParsedStructField { ident, name, ty, field } = f;
+        let ParsedStructField { name, .. } = f;
         quote! {
-            builder.tensor_info(format!("{root}{}", #name).as_str())?;
+            builder.get_tensor_info(::std::fmt::format(format_args!("{root}{}", #name)).as_str())?;
             
         }
         
@@ -279,7 +346,7 @@ fn build_struct_fields(pstruct: &ParsedStruct) -> TokenStream {
                 ),
                 ParsedType::Tensor(_) => {
                     quote! {
-                        let #escaped_ident = unsafe { GTensor::null() };
+                        let #escaped_ident = unsafe { Tensor::null() };
                         tensors += 1;
                     }
                 }
@@ -287,12 +354,19 @@ fn build_struct_fields(pstruct: &ParsedStruct) -> TokenStream {
                    
                     quote! {
                         let #escaped_ident: #path = {
-                            let (#escaped_ident, tensors_) = ggml::gguf::Deserialize::deserialize_relative(format!("{root}{}.", #name).as_str(), builder)?;
+                            let (#escaped_ident, tensors_) = ggml::gguf::Deserialize::deserialize_relative(
+                                std::fmt::format(format_args!("{root}{}.", #name)), builder
+                            )?;
                             tensors += tensors_;
                             #escaped_ident
-                        }
+                        };
                     }
                 },
+                ParsedType::KeyValueVec | ParsedType::KeyValue => {
+                    quote! {
+                        let #escaped_ident = builder.get_key_value(std::fmt::format(format_args!("{root}{}", #name)).as_str())?.try_into()?;
+                    }
+                }
             }
         }));
 
@@ -327,15 +401,12 @@ fn register_tensors_vec(
     
     match ty {
         ParsedType::Vec(ty) => {
-            let ident2 = Ident::new("value", Span::call_site());
-            let mut index2 = index.to_string();
-            index2.push_str("_");
-            let mut format_str = format_str;
-            format_str.push_str(".{");
-            format_str.push_str(index2.as_str());
-            format_str.push_str("}");
-
-            let inner_loop = register_tensors_vec(&ident2,  ty, index2, format_str);
+            let inner_loop = {
+                let ident = Ident::new("value", Span::call_site());
+                let index = format!("_{index}");
+                let format_str= format!("{format_str}.{{{index}}}" );
+                register_tensors_vec(&ident,  ty, index, format_str)
+            };
 
             quote! {
                 for (#index, value) in #ident.iter_mut().enumerate() {
@@ -349,7 +420,7 @@ fn register_tensors_vec(
                 *value = builder.load_tensor(format!(#format_str).as_str())?;
             }
         },
-        ParsedType::Struct(ty) => {
+        ParsedType::Struct(_) => {
             quote! {
               
                 for (#index, value) in #ident.iter_mut().enumerate() {
@@ -357,6 +428,7 @@ fn register_tensors_vec(
                 }
             }
         },
+        ParsedType::KeyValue | ParsedType::KeyValueVec => TokenStream::new()
     }
 }
 
@@ -388,10 +460,12 @@ fn register_tensors(pstruct: &ParsedStruct) -> TokenStream {
                 TensorInitMode::Load => {
                     quote! { *#eident = builder.load_tensor(#name)?; }
                 },
+                TensorInitMode::Skip => quote! {},
             },
             ParsedType::Struct(_) => {
-                quote! { #eident.register_tensor( format!("{root}{}", #name), builder);  }
+                quote! { #eident.register_tensors( format!("{root}{}", #name), builder);  }
             },
+            ParsedType::KeyValue | ParsedType::KeyValueVec => TokenStream::new()
         }
     });
 
@@ -399,7 +473,7 @@ fn register_tensors(pstruct: &ParsedStruct) -> TokenStream {
     
 }
 
-#[proc_macro_derive(Deserialize, attributes( rename ))]
+#[proc_macro_derive(Deserialize, attributes(rename,skip))]
 pub fn derive_deserialize_fn(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
 
@@ -408,7 +482,20 @@ pub fn derive_deserialize_fn(input: proc_macro::TokenStream) -> proc_macro::Toke
         Err(e) => return e.into_compile_error().into(),
     };
 
-    let ParsedStruct { ident,  ..} = &pstruct;
+    //eprintln!("{pstruct:#?}");
+
+    let ParsedStruct { ident, ..  } = &pstruct;
+
+
+    let args = if ast.generics.params.is_empty() {
+        TokenStream::new()
+        
+    } else {
+        quote! {
+            <'a>
+        }
+            
+    };
 
     let check_tensors = check_tensors(&pstruct);
     let build_struct = build_struct_fields(&pstruct);
@@ -417,8 +504,7 @@ pub fn derive_deserialize_fn(input: proc_macro::TokenStream) -> proc_macro::Toke
 
 
     let expanded = quote! {
-        
-        impl<'a> Deserialize<'a> for #ident <'a> {
+        impl<'a> Deserialize<'a> for #ident #args {
             fn deserialize_relative<B: ggml::builder::Builder<'a>>(root: String, builder: &B) -> Result<(Self, usize), B::Error> {
                 let mut tensors = 0;
                 #check_tensors
@@ -437,10 +523,8 @@ pub fn derive_deserialize_fn(input: proc_macro::TokenStream) -> proc_macro::Toke
                 #register_tensors
 
                 Ok(())
-
             }
         }
-
     };
 
     proc_macro::TokenStream::from(expanded)

@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use ggml_sys::root::*;
 
-use crate::tensor::GTensor;
+use crate::tensor::Tensor;
 
 pub use ggml_sys::root::ggml_type;
 
@@ -10,14 +10,15 @@ pub mod backend;
 pub mod builder;
 pub mod error;
 pub mod gguf;
+pub mod graph;
 pub mod tensor;
 
-pub struct GGMLContext(pub(crate) *mut ggml_context);
+pub struct Context(pub(crate) *mut ggml_context);
 
 pub struct TensorsIterator<'a> {
     next_tensor: *mut ggml_tensor,
     ggml_ctx: *mut ggml_context,
-    phantom: PhantomData<&'a GGMLContext>,
+    phantom: PhantomData<&'a Context>,
 }
 
 impl<'a> TensorsIterator<'a> {
@@ -33,20 +34,20 @@ impl<'a> TensorsIterator<'a> {
 }
 
 impl<'a> Iterator for TensorsIterator<'a> {
-    type Item = GTensor<'a>;
+    type Item = Tensor<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.next_tensor.is_null() {
             return None;
         }
 
-        let result = GTensor(self.next_tensor, PhantomData);
+        let result = Tensor(self.next_tensor, PhantomData);
         self.next_tensor = unsafe { ggml_get_next_tensor(self.ggml_ctx, self.next_tensor) };
         Some(result)
     }
 }
 
-impl GGMLContext {
+impl Context {
     pub fn new() -> Self {
         let init_params = ggml_init_params {
             mem_size: 0,
@@ -63,7 +64,7 @@ impl GGMLContext {
     }
 }
 
-impl<'a> Drop for GGMLContext {
+impl<'a> Drop for Context {
     fn drop(&mut self) {
         unsafe { ggml_free(self.0) }
     }

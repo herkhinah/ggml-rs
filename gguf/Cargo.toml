@@ -1,0 +1,17 @@
+[package]
+name = "gguf"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+proc-macro = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+proc-macro2 = "1.0.70"
+syn = { version = "2.0.41", features = [ "parsing", "full" ] }
+quote = "1.0.33"
+proc-macro-common = { path = "../proc-macro-common" }

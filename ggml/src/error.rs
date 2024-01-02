@@ -5,7 +5,9 @@ use thiserror::Error;
 use crate::gguf::GGUFError;
 
 #[derive(Debug, Error)]
-pub enum GError {
+pub enum Error {
+    #[error("expected cpu backend")]
+    BackendNotCpu,
     #[error("failed to initialize the cublas backend")]
     CublasInitFailed,
     #[error("cublas wasn't loaded")]
@@ -19,5 +21,7 @@ pub enum GError {
     #[error("failed to open file")]
     FileError(std::io::Error),
     #[error("gguf error")]
-    GGUFError(GGUFError),
+    GGUFError(#[from] GGUFError),
+    #[error("ggml_new_tensor failed")]
+    GGMLNewTensorFailed,
 }
